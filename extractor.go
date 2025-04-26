@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"golang-etl/schema"
 	"log"
 	"path/filepath"
 	"reflect"
@@ -207,26 +208,31 @@ func getColumnsFromRow(row GenericRow) ([]string, []reflect.Type) {
 }
 
 func createParquetWriter(output string, compression parquet.CompressionCodec) (*writer.JSONWriter, source.ParquetFile, error) {
-	schema := `
-	{
-	"Tag": "name=schema",
-	"Fields": [
-		{
-		"Tag": "name=id, type=INT64, repetitiontype=REQUIRED"
-		},
-		{
-		"Tag": "name=data, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=REQUIRED"
-		}
-	]
-	}
-	`
+	s := schema.MustLoadSchema("schema/db.yaml")
+	dbSchema := schema.FormatSchema(s)
+
+	log.Println(dbSchema)
+
+	// db_schema := `
+	// {
+	// "Tag": "name=schema",
+	// "Fields": [
+	// 	{
+	// 	"Tag": "name=id, type=INT64, repetitiontype=REQUIRED"
+	// 	},
+	// 	{
+	// 	"Tag": "name=data, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=REQUIRED"
+	// 	}
+	// ]
+	// }
+	// `
 
 	f, err := local.NewLocalFileWriter(output)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to create output file: %v", err)
 	}
 
-	pw, err := writer.NewJSONWriter(schema, f, 4)
+	pw, err := writer.NewJSONWriter(dbSchema, f, 4)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to create parquet writer: %v", err)
 	}

@@ -1,0 +1,4 @@
+Tag: "name=schema"
+Fields:
+  - Tag: "name=id, type=INT64, repetitiontype=REQUIRED"
+  - Tag: "name=data, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=REQUIRED"
