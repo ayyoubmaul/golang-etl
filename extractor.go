@@ -41,6 +41,7 @@ type TableJob struct {
 func fetchDataByKeyRange(ctx context.Context, shard string, job TableJob, startKey, endKey int64, dataChan chan<- GenericRow, fetchWg *sync.WaitGroup, semaphore chan struct{}) {
 	defer fetchWg.Done()
 
+	fmt.Printf("[Fetch] Available fetch slots: %d\n", cap(semaphore)-len(semaphore))
 	semaphore <- struct{}{}
 	defer func() {
 		<-semaphore // Release slot when done
@@ -115,13 +116,14 @@ func parquetWriter(ctx context.Context, outputPrefix string, compression parquet
 
 	var fileCounter int
 
-	batchSize := 1000000
+	batchSize := 100000
 	batch := make([]interface{}, 0, batchSize)
 
 	writeBatch := func(batch []interface{}, fileCounter int) {
 		// Acquire semaphore slot
-		semaphore <- struct{}{}
-		defer func() { <-semaphore }()
+		// semaphore <- struct{}{}
+		// fmt.Printf("[Write] Available fetch slots: %d\n", cap(semaphore)-len(semaphore))
+		// defer func() { <-semaphore }()
 
 		outputFile := filepath.Join("output", fmt.Sprintf("%s_batch_%d.parquet", outputPrefix, fileCounter))
 
@@ -161,7 +163,16 @@ func parquetWriter(ctx context.Context, outputPrefix string, compression parquet
 				// Channel closed
 				if len(batch) > 0 {
 					fileCounter++
-					writeBatch(batch, fileCounter)
+					batchCopy := append([]interface{}(nil), batch...) // Safe copy
+					writeWg.Add(1)
+					go func(batchCopy []interface{}, counter int) {
+						defer writeWg.Done()
+						fmt.Printf("[Write] Available fetch slots: %d\n", cap(semaphore)-len(semaphore))
+						semaphore <- struct{}{}        // Acquire
+						defer func() { <-semaphore }() // Release
+
+						writeBatch(batchCopy, counter)
+					}(batchCopy, fileCounter)
 				}
 				return
 			}
@@ -170,7 +181,16 @@ func parquetWriter(ctx context.Context, outputPrefix string, compression parquet
 
 			if len(batch) >= batchSize {
 				fileCounter++
-				writeBatch(batch, fileCounter)
+				batchCopy := append([]interface{}(nil), batch...) // Safe copy
+				writeWg.Add(1)
+				go func(batchCopy []interface{}, counter int) {
+					defer writeWg.Done()
+					fmt.Printf("[Write] Available fetch slots: %d\n", cap(semaphore)-len(semaphore))
+					semaphore <- struct{}{}        // Acquire
+					defer func() { <-semaphore }() // Release
+
+					writeBatch(batchCopy, counter)
+				}(batchCopy, fileCounter)
 				batch = batch[:0]
 			}
 		}
@@ -211,7 +231,7 @@ func createParquetWriter(output string, compression parquet.CompressionCodec) (*
 	s := schema.MustLoadSchema("schema/db.yaml")
 	dbSchema := schema.FormatSchema(s)
 
-	log.Println(dbSchema)
+	// log.Println(dbSchema)
 
 	// db_schema := `
 	// {
@@ -272,9 +292,9 @@ func main() {
 		var writeWg sync.WaitGroup
 
 		fetchSemaphore := make(chan struct{}, 10)
-		writeSemaphore := make(chan struct{}, 10)
+		writeSemaphore := make(chan struct{}, 5)
 
-		keyRange := int64(1000000) // Define key range to split work
+		keyRange := int64(10000) // Define key range to split work
 
 		minKey, maxKey := getPrimaryKeyRange(table, table.Db)
 
