@@ -8,8 +8,8 @@ import (
 	"golang-etl/schema"
 	"log"
 	"path/filepath"
-	"reflect"
 	"sync"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/xitongsys/parquet-go-source/local"
@@ -120,11 +120,6 @@ func parquetWriter(ctx context.Context, outputPrefix string, compression parquet
 	batch := make([]interface{}, 0, batchSize)
 
 	writeBatch := func(batch []interface{}, fileCounter int) {
-		// Acquire semaphore slot
-		// semaphore <- struct{}{}
-		// fmt.Printf("[Write] Available fetch slots: %d\n", cap(semaphore)-len(semaphore))
-		// defer func() { <-semaphore }()
-
 		outputFile := filepath.Join("output", fmt.Sprintf("%s_batch_%d.parquet", outputPrefix, fileCounter))
 
 		pw, f, err := createParquetWriter(outputFile, compression)
@@ -163,13 +158,13 @@ func parquetWriter(ctx context.Context, outputPrefix string, compression parquet
 				// Channel closed
 				if len(batch) > 0 {
 					fileCounter++
-					batchCopy := append([]interface{}(nil), batch...) // Safe copy
+					batchCopy := append([]interface{}(nil), batch...)
 					writeWg.Add(1)
 					go func(batchCopy []interface{}, counter int) {
 						defer writeWg.Done()
 						fmt.Printf("[Write] Available fetch slots: %d\n", cap(semaphore)-len(semaphore))
-						semaphore <- struct{}{}        // Acquire
-						defer func() { <-semaphore }() // Release
+						semaphore <- struct{}{}
+						defer func() { <-semaphore }()
 
 						writeBatch(batchCopy, counter)
 					}(batchCopy, fileCounter)
@@ -181,13 +176,13 @@ func parquetWriter(ctx context.Context, outputPrefix string, compression parquet
 
 			if len(batch) >= batchSize {
 				fileCounter++
-				batchCopy := append([]interface{}(nil), batch...) // Safe copy
+				batchCopy := append([]interface{}(nil), batch...) // Safe copy, because every iteration batch will be reset by batch = batch[:0]
 				writeWg.Add(1)
 				go func(batchCopy []interface{}, counter int) {
 					defer writeWg.Done()
 					fmt.Printf("[Write] Available fetch slots: %d\n", cap(semaphore)-len(semaphore))
-					semaphore <- struct{}{}        // Acquire
-					defer func() { <-semaphore }() // Release
+					semaphore <- struct{}{}
+					defer func() { <-semaphore }()
 
 					writeBatch(batchCopy, counter)
 				}(batchCopy, fileCounter)
@@ -215,37 +210,9 @@ func getPrimaryKeyRange(job TableJob, dbName string) (int64, int64) {
 	return minKey, maxKey
 }
 
-func getColumnsFromRow(row GenericRow) ([]string, []reflect.Type) {
-	columns := make([]string, 0, len(row))
-	columnTypes := make([]reflect.Type, 0, len(row))
-
-	for col, value := range row {
-		columns = append(columns, col)
-		columnTypes = append(columnTypes, reflect.TypeOf(value))
-	}
-
-	return columns, columnTypes
-}
-
 func createParquetWriter(output string, compression parquet.CompressionCodec) (*writer.JSONWriter, source.ParquetFile, error) {
 	s := schema.MustLoadSchema("schema/db.yaml")
 	dbSchema := schema.FormatSchema(s)
-
-	// log.Println(dbSchema)
-
-	// db_schema := `
-	// {
-	// "Tag": "name=schema",
-	// "Fields": [
-	// 	{
-	// 	"Tag": "name=id, type=INT64, repetitiontype=REQUIRED"
-	// 	},
-	// 	{
-	// 	"Tag": "name=data, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=REQUIRED"
-	// 	}
-	// ]
-	// }
-	// `
 
 	f, err := local.NewLocalFileWriter(output)
 	if err != nil {
@@ -268,14 +235,20 @@ func main() {
 		"db_2": "root:root@tcp(127.0.0.1:3308)/pikachu",
 	}
 
+	start := time.Now()
+	defer func() {
+		elapsed := time.Since(start)
+		log.Printf("[Timer] parquetWriter runtime: %s", elapsed)
+	}()
+
 	dbs = make(map[string]*sql.DB)
 	for name, dsn := range shards {
 		db, err := sql.Open("mysql", dsn)
 		if err != nil {
 			panic(fmt.Sprintf("DB connect error to %s: %v", name, err))
 		}
-		db.SetMaxOpenConns(10)
-		db.SetMaxIdleConns(5)
+		db.SetMaxOpenConns(20)
+		db.SetMaxIdleConns(10)
 		dbs[name] = db
 	}
 
@@ -291,8 +264,8 @@ func main() {
 		var fetchWg sync.WaitGroup
 		var writeWg sync.WaitGroup
 
-		fetchSemaphore := make(chan struct{}, 10)
-		writeSemaphore := make(chan struct{}, 5)
+		fetchSemaphore := make(chan struct{}, 20)
+		writeSemaphore := make(chan struct{}, 20)
 
 		keyRange := int64(10000) // Define key range to split work
 
